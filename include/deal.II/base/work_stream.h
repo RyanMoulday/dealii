@@ -661,7 +661,140 @@ namespace WorkStream
 
     }    // namespace tbb_no_coloring
 #  endif // DEAL_II_WITH_TBB
+#  ifdef DEAL_II_WITH_TASKFLOW
+    namespace taskflow_no_coloring
+    {
+    template <typename Worker,
+              typename Copier,
+              typename Iterator,
+              typename ScratchData,
+              typename CopyData>
+    void run(const Iterator &                         begin,
+             const typename identity<Iterator>::type &end,
+             Worker                                   worker,
+             Copier                                   copier,
+             const ScratchData &                      sample_scratch_data,
+             const CopyData &                         sample_copy_data,
+             const unsigned int queue_length = 2 * MultithreadInfo::n_threads(),
+             const unsigned int chunk_size   = 8)
 
+    {
+      struct ScratchDataObjects
+    {
+      std::unique_ptr<ScratchData> scratch_data;
+      bool                         currently_in_use;
+
+      /**
+       * Default constructor.
+       */
+      ScratchDataObjects()
+        : currently_in_use(false)
+      {}
+
+      ScratchDataObjects(std::unique_ptr<ScratchData> &&p,
+                                const bool                     in_use)
+        : scratch_data(std::move(p))
+        , currently_in_use(in_use)
+      {}
+
+      // Provide a copy constructor that actually doesn't copy the
+      // internal state. This makes handling ScratchAndCopyDataObjects
+      // easier to handle with STL containers.
+      ScratchDataObjects(const ScratchDataObjects &)
+        : currently_in_use(false)
+      {}
+    };
+
+      tf::Executor  &executor = MultithreadInfo::get_taskflow_executor();
+      tf::Taskflow  taskflow;
+
+      using ScratchDataList = std::list<ScratchDataObjects>;
+
+      Threads::ThreadLocalStorage<ScratchDataList> data;
+
+      tf::Task last_copier;
+
+      //Silence unused variable arguments
+      (void) queue_length;
+      (void) chunk_size;
+
+      unsigned int idx = 0;
+
+      std::vector<std::unique_ptr<CopyData>> copy_datas;
+
+      for (Iterator i = begin; i != end; ++i, ++idx)
+        {
+          copy_datas.emplace_back();
+          auto worker_task = taskflow
+                               .emplace([it = i,
+                                         idx,
+                                         &data,
+                                         &sample_scratch_data,
+                                         &sample_copy_data,
+                                         &copy_datas,
+                                         &worker]() {
+                                ScratchData *scratch_data = nullptr;
+
+                                  ScratchDataList &scratch_data_list = data.get();
+                                  // see if there is an unused object. if so, grab it and mark
+                                  // it as used
+                                  for (typename ScratchDataList::iterator p =
+                                          scratch_data_list.begin();
+                                        p != scratch_data_list.end();
+                                        ++p)
+                                    {
+                                    if (p->currently_in_use == false)
+                                      {
+                                        scratch_data        = p->scratch_data.get();
+                                        p->currently_in_use = true;
+                                        break;
+                                      }
+                                    }
+                                  // if no element in the list was found, create one and mark it as
+                                  // used
+                                  if (scratch_data == nullptr)
+                                    {
+                                      scratch_data_list.emplace_back(
+                                        std::make_unique<ScratchData>(sample_scratch_data),
+                                        true);
+                                      scratch_data =
+                                        scratch_data_list.back().scratch_data.get();
+                                    }
+                                  
+                                 auto &      copy    = copy_datas[idx];
+                                 copy =
+                                   std::make_unique<CopyData>(sample_copy_data);
+                                 worker(it, *scratch_data, *copy.get());
+                                 for (typename ScratchDataList::iterator p =
+                                              scratch_data_list.begin();
+                                            p != scratch_data_list.end();
+                                            ++p)
+                                        {
+                                        if (p->scratch_data.get() == scratch_data)
+                                          {
+                                            Assert(p->currently_in_use == true, ExcInternalError());
+                                            p->currently_in_use = false;
+                                          }}
+                               })
+                               .name("worker");
+          tf::Task copier_task = taskflow
+                                   .emplace([idx, &copy_datas, &copier]() {
+                                     copier(*copy_datas[idx].get());
+                                     copy_datas[idx].reset();
+                                   })
+                                   .name("copy");
+
+          worker_task.precede(copier_task);
+
+          if (!last_copier.empty())
+            last_copier.precede(copier_task);
+          last_copier = copier_task;
+        }
+
+      executor.run(taskflow).wait();
+    }
+    } // namespace taskflow_no_coloring
+#  endif
 
     /**
      * A reference implementation without using multithreading to be used if we
@@ -1144,7 +1277,51 @@ namespace WorkStream
 
     if (MultithreadInfo::n_threads() > 1)
       {
-#  ifdef DEAL_II_WITH_TBB
+#  ifdef DEAL_II_WITH_TASKFLOW
+        if (static_cast<const std::function<void(const CopyData &)> &>(copier))
+          {
+            // If we have a copier, run the algorithm:
+            internal::taskflow_no_coloring::run(begin,
+                                           end,
+                                           worker,
+                                           copier,
+                                           sample_scratch_data,
+                                           sample_copy_data,
+                                           queue_length,
+                                           chunk_size);
+          }
+        else
+          {
+            // There is no copier function. in this case, we have an
+            // embarrassingly parallel problem where we can
+            // essentially apply parallel_for. because parallel_for
+            // requires subdividing the range for which operator- is
+            // necessary between iterators, it is often inefficient to
+            // apply it directly to cell ranges and similar iterator
+            // types for which operator- is expensive or, in fact,
+            // nonexistent. rather, in that case, we simply copy the
+            // iterators into a large array and use operator- on
+            // iterators to this array of iterators.
+            //
+            // instead of duplicating code, this is essentially the
+            // same situation we have in the colored implementation below, so we
+            // just defer to that place
+            std::vector<std::vector<Iterator>> all_iterators(1);
+            for (Iterator p = begin; p != end; ++p)
+              all_iterators[0].push_back(p);
+
+            run(all_iterators,
+                worker,
+                copier,
+                sample_scratch_data,
+                sample_copy_data,
+                queue_length,
+                chunk_size);
+          }
+
+        // exit this function to not run the sequential version below:
+        return;
+#  elif defined(DEAL_II_WITH_TBB)
         if (static_cast<const std::function<void(const CopyData &)> &>(copier))
           {
             // If we have a copier, run the algorithm:
