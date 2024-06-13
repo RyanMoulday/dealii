@@ -1264,6 +1264,7 @@ namespace Particles
         
 
         scratch.real_locations.clear();
+        copy.local_particles_out_of_cell.clear();
         for (const auto &particle : pic)
           scratch.real_locations.push_back(particle.get_location());
 
