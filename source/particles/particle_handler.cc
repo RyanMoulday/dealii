@@ -18,6 +18,7 @@
 #include <deal.II/numerics/vector_tools.h>
 
 #include <deal.II/particles/particle_handler.h>
+#include <deal.II/base/work_stream.h>
 
 #include <limits>
 #include <memory>
@@ -1222,54 +1223,79 @@ namespace Particles
 
     std::vector<particle_iterator> particles_out_of_cell;
 
+    std::vector<Point<spacedim>> real_locations(global_max_particles_per_cell);
+    std::vector<Point<dim>>      reference_locations(global_max_particles_per_cell);
+
     // Reserve some space for particles that need sorting to avoid frequent
     // re-allocation. Guess 25% of particles need sorting. Balance memory
     // overhead and performance.
     particles_out_of_cell.reserve(n_locally_owned_particles() / 4);
 
-    // Now update the reference locations of the moved particles
-    std::vector<Point<spacedim>> real_locations;
-    std::vector<Point<dim>>      reference_locations;
-    real_locations.reserve(global_max_particles_per_cell);
-    reference_locations.reserve(global_max_particles_per_cell);
+    struct CopyData
+    {
+      std::vector<particle_iterator> local_particles_out_of_cell;
+    };
 
-    for (const auto &cell : triangulation->active_cell_iterators())
-      {
-        // Particles can be inserted into arbitrary cells, e.g. if their cell is
+    struct ScratchData
+    {
+      std::vector<Point<spacedim>> real_locations;
+      std::vector<Point<dim>>      reference_locations;
+      ScratchData(int size){
+        real_locations.reserve(size);
+        reference_locations.reserve(size);
+      }
+    };
+
+    const auto location_worker = [&](const typename Triangulation<dim>::active_cell_iterator &cell,
+            ScratchData                 &scratch,
+            CopyData                    &copy) {
+              // Particles can be inserted into arbitrary cells, e.g. if their cell is
         // not known. However, for artificial cells we can not evaluate
         // the reference position of particles. Do not sort particles that are
         // not locally owned, because they will be sorted by the process that
         // owns them.
         if (cell->is_locally_owned() == false)
           {
-            continue;
+            return;
           }
 
         const unsigned int n_pic = n_particles_in_cell(cell);
         auto               pic   = particles_in_cell(cell);
+        
 
-        real_locations.clear();
+        scratch.real_locations.clear();
         for (const auto &particle : pic)
-          real_locations.push_back(particle.get_location());
+          scratch.real_locations.push_back(particle.get_location());
 
-        reference_locations.resize(n_pic);
+        scratch.reference_locations.resize(n_pic);
         mapping->transform_points_real_to_unit_cell(cell,
-                                                    real_locations,
-                                                    reference_locations);
+                                                    scratch.real_locations,
+                                                    scratch.reference_locations);
 
         auto particle = pic.begin();
-        for (const auto &p_unit : reference_locations)
+        for (const auto &p_unit : scratch.reference_locations)
           {
             if (numbers::is_finite(p_unit[0]) &&
                 GeometryInfo<dim>::is_inside_unit_cell(p_unit,
                                                        tolerance_inside_cell))
               particle->set_reference_location(p_unit);
             else
-              particles_out_of_cell.push_back(particle);
+              copy.local_particles_out_of_cell.push_back(particle);
 
             ++particle;
-          }
+            }};
+      
+    const auto location_copier = [&](const CopyData &copy) {
+      for (const auto &p : copy.local_particles_out_of_cell){
+        particles_out_of_cell.push_back(p);
       }
+    };
+    WorkStream::run(triangulation->begin_active(),
+                    triangulation->end(),
+                    location_worker,
+                    location_copier,
+                    ScratchData(global_max_particles_per_cell),
+                    CopyData());
 
     // There are three reasons why a particle is not in its old cell:
     // It moved to another cell, to another subdomain or it left the mesh.
