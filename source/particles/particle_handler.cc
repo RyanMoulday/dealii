@@ -12,6 +12,8 @@
 //
 // ------------------------------------------------------------------------
 
+#include <deal.II/base/work_stream.h>
+
 #include <deal.II/grid/grid_tools.h>
 #include <deal.II/grid/grid_tools_cache.h>
 
@@ -1233,43 +1235,76 @@ namespace Particles
     real_locations.reserve(global_max_particles_per_cell);
     reference_locations.reserve(global_max_particles_per_cell);
 
-    for (const auto &cell : triangulation->active_cell_iterators())
+    struct StageOne_CopyData
+    {
+      std::vector<particle_iterator> local_particles_out_of_cell;
+    };
+
+    struct StageOne_ScratchData
+    {
+      std::vector<Point<spacedim>> real_locations;
+      std::vector<Point<dim>>      reference_locations;
+      StageOne_ScratchData(int size)
       {
+        real_locations.reserve(size);
+        reference_locations.reserve(size);
+      }
+    };
+
+    const auto stageone_worker =
+      [&](
+        const typename Triangulation<dim, spacedim>::active_cell_iterator &cell,
+        StageOne_ScratchData &scratch,
+        StageOne_CopyData    &copy) {
         // Particles can be inserted into arbitrary cells, e.g. if their cell is
         // not known. However, for artificial cells we can not evaluate
         // the reference position of particles. Do not sort particles that are
         // not locally owned, because they will be sorted by the process that
         // owns them.
+        scratch.real_locations.clear();
+        copy.local_particles_out_of_cell.clear();
+
         if (cell->is_locally_owned() == false)
           {
-            continue;
+            return;
           }
 
         const unsigned int n_pic = n_particles_in_cell(cell);
         auto               pic   = particles_in_cell(cell);
 
-        real_locations.clear();
         for (const auto &particle : pic)
-          real_locations.push_back(particle.get_location());
+          scratch.real_locations.push_back(particle.get_location());
 
-        reference_locations.resize(n_pic);
-        mapping->transform_points_real_to_unit_cell(cell,
-                                                    real_locations,
-                                                    reference_locations);
+        scratch.reference_locations.resize(n_pic);
+        mapping->transform_points_real_to_unit_cell(
+          cell, scratch.real_locations, scratch.reference_locations);
 
         auto particle = pic.begin();
-        for (const auto &p_unit : reference_locations)
+        for (const auto &p_unit : scratch.reference_locations)
           {
             if (numbers::is_finite(p_unit[0]) &&
                 GeometryInfo<dim>::is_inside_unit_cell(p_unit,
                                                        tolerance_inside_cell))
               particle->set_reference_location(p_unit);
             else
-              particles_out_of_cell.push_back(particle);
+              copy.local_particles_out_of_cell.push_back(particle);
 
             ++particle;
           }
-      }
+      };
+
+    const auto stageone_copier = [&](const StageOne_CopyData &copy) {
+      for (const auto &p : copy.local_particles_out_of_cell)
+        {
+          particles_out_of_cell.push_back(p);
+        }
+    };
+    WorkStream::run(triangulation->begin_active(),
+                    triangulation->end(),
+                    stageone_worker,
+                    stageone_copier,
+                    StageOne_ScratchData(global_max_particles_per_cell),
+                    StageOne_CopyData());
 
     // There are three reasons why a particle is not in its old cell:
     // It moved to another cell, to another subdomain or it left the mesh.
