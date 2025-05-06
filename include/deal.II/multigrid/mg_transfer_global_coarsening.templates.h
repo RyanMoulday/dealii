@@ -4595,7 +4595,7 @@ MGTransferMF<dim, Number, MemorySpace>::prolongate(const unsigned int to_level,
 {
   if constexpr (std::is_same_v<MemorySpace, dealii::MemorySpace::Host>)
     {
-      this->prolongate(to_level, dst, src);
+      this->prolongate_host(to_level, dst, src);
     }
   else
     {
@@ -4607,7 +4607,7 @@ MGTransferMF<dim, Number, MemorySpace>::prolongate(const unsigned int to_level,
       copy_to_host(dst_host, dst);
       copy_to_host(src_host, src);
 
-      this->transfer_host->prolongate(to_level, dst_host, src_host);
+      this->transfer_host->prolongate_host(to_level, dst_host, src_host);
 
       copy_from_host(dst, dst_host);
     }
