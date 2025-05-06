@@ -1007,6 +1007,8 @@ public:
    * Value type.
    */
   using VectorType = LinearAlgebra::distributed::Vector<Number, MemorySpace>;
+  using VectorTypeHost =
+    LinearAlgebra::distributed::Vector<Number, dealii::MemorySpace::Host>;
 
   /**
    * Default constructor.
@@ -1029,10 +1031,9 @@ public:
    * instance MGTwoLevelTransfer). It can also be a std::shared_ptr or
    * std::unique_ptr to the actual transfer operator.
    */
-  template <typename MGTwoLevelTransferObject>
+  template <typename MGTwoLevelTransferObject, typename Func>
   MGTransferMF(const MGLevelObject<MGTwoLevelTransferObject> &transfer,
-               const std::function<void(const unsigned int, VectorType &)>
-                 &initialize_dof_vector = {});
+               Func &&initialize_dof_vector);
 
   /**
    * Set two-level transfers.
@@ -1131,6 +1132,11 @@ public:
    * Perform prolongation.
    */
   void
+  prolongate_host(const unsigned int to_level,
+                  VectorType        &dst,
+                  const VectorType  &src) const;
+
+  void
   prolongate(const unsigned int to_level,
              VectorType        &dst,
              const VectorType  &src) const override;
@@ -1147,6 +1153,11 @@ public:
    * Perform restriction.
    */
   virtual void
+  restrict_and_add_host(const unsigned int from_level,
+                        VectorType        &dst,
+                        const VectorType  &src) const;
+
+  virtual void
   restrict_and_add(const unsigned int from_level,
                    VectorType        &dst,
                    const VectorType  &src) const override;
@@ -1162,6 +1173,19 @@ public:
    */
   template <class InVector>
   void
+  copy_to_mg_host(const DoFHandler<dim>     &dof_handler,
+                  MGLevelObject<VectorType> &dst,
+                  const InVector            &src) const;
+
+  template <typename Number2>
+  void
+  copy_to_mg_device(
+    const DoFHandler<dim>                                          &dof_handler,
+    MGLevelObject<VectorType>                                      &dst,
+    const LinearAlgebra::distributed::Vector<Number2, MemorySpace> &src) const;
+
+  template <class InVector>
+  void
   copy_to_mg(const DoFHandler<dim>     &dof_handler,
              MGLevelObject<VectorType> &dst,
              const InVector            &src) const;
@@ -1175,6 +1199,19 @@ public:
    * initialize_two_level_transfers(). Alternatively, the numbering of the DoFs
    * need to be same.
    */
+  template <class OutVector>
+  void
+  copy_from_mg_host(const DoFHandler<dim>           &dof_handler,
+                    OutVector                       &dst,
+                    const MGLevelObject<VectorType> &src) const;
+
+  template <typename Number2>
+  void
+  copy_from_mg_device(
+    const DoFHandler<dim>                                    &dof_handler,
+    LinearAlgebra::distributed::Vector<Number2, MemorySpace> &dst,
+    const MGLevelObject<VectorType>                          &src) const;
+
   template <class OutVector>
   void
   copy_from_mg(const DoFHandler<dim>           &dof_handler,
@@ -1318,11 +1355,28 @@ private:
    */
   MGLevelObject<ObserverPointer<MGTwoLevelTransferBase<VectorType>>> transfer;
 
+  std::unique_ptr<MGTransferMF<dim, Number, dealii::MemorySpace::Host>>
+    transfer_host;
+
   /**
    * External partitioners used during initialize_dof_vector().
    */
   std::vector<std::shared_ptr<const Utilities::MPI::Partitioner>>
     external_partitioners;
+
+  template <typename Number2>
+  void
+  copy_to_host(
+    LinearAlgebra::distributed::Vector<Number2, dealii::MemorySpace::Host> &dst,
+    const LinearAlgebra::distributed::Vector<Number2, MemorySpace> &src) const;
+
+
+  template <typename Number2>
+  void
+  copy_from_host(
+    LinearAlgebra::distributed::Vector<Number2, MemorySpace> &dst,
+    const LinearAlgebra::distributed::Vector<Number2, dealii::MemorySpace::Host>
+      &src) const;
 };
 
 
@@ -1440,20 +1494,26 @@ using MGTransferBlockGlobalCoarsening =
 
 
 template <int dim, typename Number, typename MemorySpace>
-template <typename MGTwoLevelTransferObject>
+template <typename MGTwoLevelTransferObject, typename Func>
 MGTransferMF<dim, Number, MemorySpace>::MGTransferMF(
   const MGLevelObject<MGTwoLevelTransferObject> &transfer,
-  const std::function<void(const unsigned int, VectorType &)>
-    &initialize_dof_vector)
+  Func                                         &&initialize_dof_vector)
 {
-  this->transfer.clear();
-  this->internal_transfer.clear();
+  if constexpr (std::is_same_v<MemorySpace, dealii::MemorySpace::Host>)
+    {
+      this->transfer.clear();
+      this->internal_transfer.clear();
 
-  this->initialize_transfer_references(transfer);
-  this->build(initialize_dof_vector);
+      this->initialize_transfer_references(transfer);
+      this->build(initialize_dof_vector);
+    }
+  else
+    {
+      this->transfer_host =
+        std::make_unique<MGTransferMF<dim, Number, dealii::MemorySpace::Host>>(
+          transfer, initialize_dof_vector);
+    }
 }
-
-
 
 template <int dim, typename Number, typename MemorySpace>
 template <typename MGTwoLevelTransferObject>
@@ -1537,7 +1597,7 @@ MGTransferMF<dim, Number, MemorySpace>::initialize_dof_vector(
 template <int dim, typename Number, typename MemorySpace>
 template <class InVector>
 void
-MGTransferMF<dim, Number, MemorySpace>::copy_to_mg(
+MGTransferMF<dim, Number, MemorySpace>::copy_to_mg_host(
   const DoFHandler<dim>     &dof_handler,
   MGLevelObject<VectorType> &dst,
   const InVector            &src) const
@@ -1591,12 +1651,56 @@ MGTransferMF<dim, Number, MemorySpace>::copy_to_mg(
     }
 }
 
+template <int dim, typename Number, typename MemorySpace>
+template <typename Number2>
+void
+MGTransferMF<dim, Number, MemorySpace>::copy_to_mg_device(
+  const DoFHandler<dim>                                          &dof_handler,
+  MGLevelObject<VectorType>                                      &dst,
+  const LinearAlgebra::distributed::Vector<Number2, MemorySpace> &src) const
+{
+  MGLevelObject<
+    LinearAlgebra::distributed::Vector<Number, dealii::MemorySpace::Host>>
+    dst_host(dst.min_level(), dst.max_level());
+  LinearAlgebra::distributed::Vector<Number2, dealii::MemorySpace::Host>
+    src_host;
+
+  copy_to_host(src_host, src);
+  for (unsigned int l = dst.min_level(); l < dst.max_level(); ++l)
+    copy_to_host(dst_host[l], dst[l]);
+
+  this->transfer_host->copy_to_mg_host(dof_handler, dst_host, src_host);
+
+  for (unsigned int l = dst.min_level(); l <= dst.max_level(); ++l)
+    copy_from_host(dst[l], dst_host[l]);
+}
+
+template <int dim, typename Number, typename MemorySpace>
+template <class InVector>
+void
+MGTransferMF<dim, Number, MemorySpace>::copy_to_mg(
+  const DoFHandler<dim>     &dof_handler,
+  MGLevelObject<VectorType> &dst,
+  const InVector            &src) const
+{
+  assert_dof_handler(dof_handler);
+
+  if constexpr (std::is_same_v<MemorySpace, dealii::MemorySpace::Host>)
+    {
+      this->copy_to_mg_host(dof_handler, dst, src);
+    }
+  else
+    {
+      this->copy_to_mg_device(dof_handler, dst, src);
+    }
+}
+
 
 
 template <int dim, typename Number, typename MemorySpace>
 template <class OutVector>
 void
-MGTransferMF<dim, Number, MemorySpace>::copy_from_mg(
+MGTransferMF<dim, Number, MemorySpace>::copy_from_mg_host(
   const DoFHandler<dim>           &dof_handler,
   OutVector                       &dst,
   const MGLevelObject<VectorType> &src) const
@@ -1642,6 +1746,50 @@ MGTransferMF<dim, Number, MemorySpace>::copy_from_mg(
           copy_unknowns(this->copy_indices_global_mine[l]);
         }
       dst.compress(VectorOperation::insert);
+    }
+}
+
+
+template <int dim, typename Number, typename MemorySpace>
+template <typename Number2>
+void
+MGTransferMF<dim, Number, MemorySpace>::copy_from_mg_device(
+  const DoFHandler<dim>                                    &dof_handler,
+  LinearAlgebra::distributed::Vector<Number2, MemorySpace> &dst,
+  const MGLevelObject<VectorType>                          &src) const
+{
+  LinearAlgebra::distributed::Vector<Number2, dealii::MemorySpace::Host>
+    dst_host;
+  MGLevelObject<
+    LinearAlgebra::distributed::Vector<Number, dealii::MemorySpace::Host>>
+    src_host(src.min_level(), src.max_level());
+
+  copy_to_host(dst_host, dst);
+  for (unsigned int l = src.min_level(); l <= src.max_level(); ++l)
+    copy_to_host(src_host[l], src[l]);
+
+  this->transfer_host->copy_from_mg(dof_handler, dst_host, src_host);
+
+  copy_from_host(dst, dst_host);
+}
+
+template <int dim, typename Number, typename MemorySpace>
+template <class OutVector>
+void
+MGTransferMF<dim, Number, MemorySpace>::copy_from_mg(
+  const DoFHandler<dim>           &dof_handler,
+  OutVector                       &dst,
+  const MGLevelObject<VectorType> &src) const
+{
+  assert_dof_handler(dof_handler);
+
+  if constexpr (std::is_same_v<MemorySpace, dealii::MemorySpace::Host>)
+    {
+      this->copy_from_mg_host(dof_handler, dst, src);
+    }
+  else
+    {
+      this->copy_from_mg_device(dof_handler, dst, src);
     }
 }
 
@@ -1729,6 +1877,40 @@ MGTransferMF<dim, Number, MemorySpace>::interpolate_to_mg(
             this->transfer[l]->interpolate(dst[l - 1], dst[l]);
         }
     }
+}
+
+
+template <int dim, typename Number, typename MemorySpace>
+template <typename Number2>
+void
+MGTransferMF<dim, Number, MemorySpace>::copy_to_host(
+  LinearAlgebra::distributed::Vector<Number2, dealii::MemorySpace::Host> &dst,
+  const LinearAlgebra::distributed::Vector<Number2, MemorySpace> &src) const
+{
+  LinearAlgebra::ReadWriteVector<Number2> rw_vector(
+    src.get_partitioner()->locally_owned_range());
+  rw_vector.import(src, VectorOperation::insert);
+
+  dst.reinit(src.get_partitioner());
+  dst.import(rw_vector, VectorOperation::insert);
+}
+
+
+template <int dim, typename Number, typename MemorySpace>
+template <typename Number2>
+void
+MGTransferMF<dim, Number, MemorySpace>::copy_from_host(
+  LinearAlgebra::distributed::Vector<Number2, MemorySpace> &dst,
+  const LinearAlgebra::distributed::Vector<Number2, dealii::MemorySpace::Host>
+    &src) const
+{
+  LinearAlgebra::ReadWriteVector<Number2> rw_vector(
+    src.get_partitioner()->locally_owned_range());
+  rw_vector.import(src, VectorOperation::insert);
+
+  if (dst.size() == 0)
+    dst.reinit(src.get_partitioner());
+  dst.import(rw_vector, VectorOperation::insert);
 }
 
 #endif

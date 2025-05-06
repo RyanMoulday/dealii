@@ -4578,12 +4578,39 @@ MGTransferMF<dim, Number, MemorySpace>::build(
 
 template <int dim, typename Number, typename MemorySpace>
 void
+MGTransferMF<dim, Number, MemorySpace>::prolongate_host(
+  const unsigned int to_level,
+  VectorType        &dst,
+  const VectorType  &src) const
+{
+  dst = Number(0.0);
+  prolongate_and_add(to_level, dst, src);
+}
+
+template <int dim, typename Number, typename MemorySpace>
+void
 MGTransferMF<dim, Number, MemorySpace>::prolongate(const unsigned int to_level,
                                                    VectorType        &dst,
                                                    const VectorType  &src) const
 {
-  dst = Number(0.0);
-  prolongate_and_add(to_level, dst, src);
+  if constexpr (std::is_same_v<MemorySpace, dealii::MemorySpace::Host>)
+    {
+      this->prolongate(to_level, dst, src);
+    }
+  else
+    {
+      LinearAlgebra::distributed::Vector<Number, dealii::MemorySpace::Host>
+        dst_host;
+      LinearAlgebra::distributed::Vector<Number, dealii::MemorySpace::Host>
+        src_host;
+
+      copy_to_host(dst_host, dst);
+      copy_to_host(src_host, src);
+
+      this->transfer_host->prolongate(to_level, dst_host, src_host);
+
+      copy_from_host(dst, dst_host);
+    }
 }
 
 
@@ -4602,12 +4629,41 @@ MGTransferMF<dim, Number, MemorySpace>::prolongate_and_add(
 
 template <int dim, typename Number, typename MemorySpace>
 void
-MGTransferMF<dim, Number, MemorySpace>::restrict_and_add(
+MGTransferMF<dim, Number, MemorySpace>::restrict_and_add_host(
   const unsigned int from_level,
   VectorType        &dst,
   const VectorType  &src) const
 {
   this->transfer[from_level]->restrict_and_add(dst, src);
+}
+
+template <int dim, typename Number, typename MemorySpace>
+void
+MGTransferMF<dim, Number, MemorySpace>::restrict_and_add(
+  const unsigned int from_level,
+  VectorType        &dst,
+  const VectorType  &src) const
+{
+  if constexpr (std::is_same_v<MemorySpace, dealii::MemorySpace::Host>)
+    {
+      this->restrict_and_add_host(from_level, dst, src);
+    }
+  else
+    {
+      LinearAlgebra::distributed::Vector<Number, dealii::MemorySpace::Host>
+        dst_host;
+      LinearAlgebra::distributed::Vector<Number, dealii::MemorySpace::Host>
+        src_host;
+
+      copy_to_host(dst_host, dst);
+      copy_to_host(src_host, src);
+
+      this->transfer_host->restrict_and_add_host(from_level,
+                                                 dst_host,
+                                                 src_host);
+
+      copy_from_host(dst, dst_host);
+    }
 }
 
 
