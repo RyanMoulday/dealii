@@ -131,28 +131,33 @@ public:
                                            MemorySpace::Default>>,
     "This class is currently only implemented for vectors of "
     "type LinearAlgebra::distributed::Vector.");
+  /**
+   * Partitioner needed by the intermediate vector.
+   */
+  std::shared_ptr<const Utilities::MPI::Partitioner> partitioner_coarse;
 
   /**
-   * The scalar type used by the vector-type template argument.
+   * Partitioner needed by the intermediate vector.
    */
-  using Number = typename VectorType::value_type;
+  std::shared_ptr<const Utilities::MPI::Partitioner> partitioner_fine;
 
   /**
    * Default constructor.
    */
-  MGTwoLevelTransferBase();
+  MGTwoLevelTransferBase()
+  {}
 
   /**
    * Perform prolongation on a solution vector.
    */
-  void
-  prolongate_and_add(VectorType &dst, const VectorType &src) const;
+  virtual void
+  prolongate_and_add(VectorType &dst, const VectorType &src) const = 0;
 
   /**
    * Perform restriction on a residual vector.
    */
-  void
-  restrict_and_add(VectorType &dst, const VectorType &src) const;
+  virtual void
+  restrict_and_add(VectorType &dst, const VectorType &src) const = 0;
 
   /**
    * Perform interpolation of a solution vector from the fine level to the
@@ -181,6 +186,51 @@ public:
    */
   virtual std::size_t
   memory_consumption() const = 0;
+};
+
+
+
+/**
+ * A class which provides extra functionality used by several MGTwoLevelTransfer
+ * schemes.
+ */
+template <typename VectorType>
+class MGTwoLevelTransferCore : public MGTwoLevelTransferBase<VectorType>
+{
+public:
+  static_assert(
+    std::is_same_v<
+      VectorType,
+      LinearAlgebra::distributed::Vector<typename VectorType::value_type,
+                                         MemorySpace::Host>> ||
+      std::is_same_v<
+        VectorType,
+        LinearAlgebra::distributed::Vector<typename VectorType::value_type,
+                                           MemorySpace::Default>>,
+    "This class is currently only implemented for vectors of "
+    "type LinearAlgebra::distributed::Vector.");
+
+  /**
+   * The scalar type used by the vector-type template argument.
+   */
+  using Number = typename VectorType::value_type;
+
+  /**
+   * Default constructor.
+   */
+  MGTwoLevelTransferCore();
+
+  /**
+   * @copydoc MGTwoLevelTransferBase::prolongate_and_add
+   */
+  void
+  prolongate_and_add(VectorType &dst, const VectorType &src) const override;
+
+  /**
+   * @copydoc MGTwoLevelTransferBase::restrict_and_add
+   */
+  void
+  restrict_and_add(VectorType &dst, const VectorType &src) const override;
 
 protected:
   /**
@@ -241,17 +291,6 @@ protected:
    * to be taken into account via weights.
    */
   bool fine_element_is_continuous;
-
-public:
-  /**
-   * Partitioner needed by the intermediate vector.
-   */
-  std::shared_ptr<const Utilities::MPI::Partitioner> partitioner_coarse;
-
-  /**
-   * Partitioner needed by the intermediate vector.
-   */
-  std::shared_ptr<const Utilities::MPI::Partitioner> partitioner_fine;
 
 protected:
   /**
@@ -327,7 +366,7 @@ protected:
  * point, and we fall back to the first option in such a case.
  */
 template <int dim, typename VectorType>
-class MGTwoLevelTransfer : public MGTwoLevelTransferBase<VectorType>
+class MGTwoLevelTransfer : public MGTwoLevelTransferCore<VectorType>
 {
 public:
   static_assert(
@@ -627,6 +666,250 @@ private:
 
   friend class internal::MGTwoLevelTransferImplementation;
 
+  friend class MGTransferMatrixFree<dim, Number, MemorySpace::Host>;
+
+  friend class MGTransferMatrixFree<dim, Number, MemorySpace::Default>;
+};
+
+
+/**
+ * A transfer class supporting device vectors via copying them to the host and
+ * using an internal trasfer of type MGTwoLevelTransfer defined on the
+ * host.
+ */
+template <int dim, typename VectorType>
+class MGTwoLevelTransferCopyToHost : public MGTwoLevelTransferBase<VectorType>
+{
+public:
+  static_assert(
+    std::is_same_v<
+      VectorType,
+      LinearAlgebra::distributed::Vector<typename VectorType::value_type,
+                                         MemorySpace::Host>> ||
+      std::is_same_v<
+        VectorType,
+        LinearAlgebra::distributed::Vector<typename VectorType::value_type,
+                                           MemorySpace::Default>>,
+    "This class is currently only implemented for vectors of "
+    "type LinearAlgebra::distributed::Vector.");
+
+
+  /**
+   * The scalar type used by the vector-type template argument.
+   */
+  using Number = typename VectorType::value_type;
+
+  using VectorTypeHost = LinearAlgebra::distributed::Vector<Number>;
+  /**
+   * Default constructor.
+   */
+  MGTwoLevelTransferCopyToHost()
+    : host_transfer()
+  {}
+
+  /**
+   * @copydoc MGTwoLevelTransfer::reinit_geometric_transfer
+   */
+  void
+  reinit_geometric_transfer(
+    const DoFHandler<dim>           &dof_handler_fine,
+    const DoFHandler<dim>           &dof_handler_coarse,
+    const AffineConstraints<Number> &constraint_fine =
+      AffineConstraints<Number>(),
+    const AffineConstraints<Number> &constraint_coarse =
+      AffineConstraints<Number>(),
+    const unsigned int mg_level_fine   = numbers::invalid_unsigned_int,
+    const unsigned int mg_level_coarse = numbers::invalid_unsigned_int)
+  {
+    host_transfer.reinit_geometric_transfer(dof_handler_fine,
+                                            dof_handler_coarse,
+                                            constraint_fine,
+                                            constraint_coarse,
+                                            mg_level_fine,
+                                            mg_level_coarse);
+  }
+
+  /**
+   * @copydoc MGTwoLevelTransfer::reinit_polynomial_transfer
+   */
+  void
+  reinit_polynomial_transfer(
+    const DoFHandler<dim>           &dof_handler_fine,
+    const DoFHandler<dim>           &dof_handler_coarse,
+    const AffineConstraints<Number> &constraint_fine =
+      AffineConstraints<Number>(),
+    const AffineConstraints<Number> &constraint_coarse =
+      AffineConstraints<Number>(),
+    const unsigned int mg_level_fine   = numbers::invalid_unsigned_int,
+    const unsigned int mg_level_coarse = numbers::invalid_unsigned_int)
+  {
+    host_transfer.reinit_polynomial_transfer(dof_handler_fine,
+                                             dof_handler_coarse,
+                                             constraint_fine,
+                                             constraint_coarse,
+                                             mg_level_fine,
+                                             mg_level_coarse);
+  }
+
+  /**
+   * @copydoc MGTwoLevelTransfer::reinit(const DoFHandler<dim>, const DoFHandler<dim>, const AffineConstraints<Number>, const AffineConstraints<Number>, const unsigned int, const unsigned int)
+   */
+  void
+  reinit(const DoFHandler<dim>           &dof_handler_fine,
+         const DoFHandler<dim>           &dof_handler_coarse,
+         const AffineConstraints<Number> &constraint_fine =
+           AffineConstraints<Number>(),
+         const AffineConstraints<Number> &constraint_coarse =
+           AffineConstraints<Number>(),
+         const unsigned int mg_level_fine   = numbers::invalid_unsigned_int,
+         const unsigned int mg_level_coarse = numbers::invalid_unsigned_int)
+  {
+    host_transfer.reinit(dof_handler_fine,
+                         dof_handler_coarse,
+                         constraint_fine,
+                         constraint_coarse,
+                         mg_level_fine,
+                         mg_level_coarse);
+  }
+
+  /**
+   * @copydoc MGTwoLevelTransfer::reinit(const MatrixFree<dim, Number>, const unsigned int, const MatrixFree<dim, Number>, const unsigned int)
+   */
+  void
+  reinit(const MatrixFree<dim, Number> &matrix_free_fine,
+         const unsigned int             dof_no_fine,
+         const MatrixFree<dim, Number> &matrix_free_coarse,
+         const unsigned int             dof_no_coarse)
+  {
+    host_transfer.reinit(matrix_free_fine,
+                         dof_no_fine,
+                         matrix_free_coarse,
+                         dof_no_coarse);
+  }
+
+  /**
+   * @copydoc MGTwoLevelTransfer::fast_polynomial_transfer_supported
+   */
+  bool
+  fast_polynomial_transfer_supported(const unsigned int fe_degree_fine,
+                                     const unsigned int fe_degree_coarse)
+  {
+    return host_transfer.fast_polynomial_transfer_supported(fe_degree_fine,
+                                                            fe_degree_coarse);
+  }
+
+  /**
+   * @copydoc MGTwoLevelTransfer::prolongate_and_add
+   */
+  void
+  prolongate_and_add(VectorType &dst, const VectorType &src) const override
+  {
+    VectorTypeHost dst_host;
+    VectorTypeHost src_host;
+
+    dst_host.reinit(dst.get_partitioner());
+    copy_to_host(src_host, src);
+
+    host_transfer.prolongate_and_add(dst_host, src_host);
+
+    copy_from_host(dst, dst_host);
+  }
+
+  /**
+   * @copydoc MGTwoLevelTransfer::restrict_and_add
+   */
+  void
+  restrict_and_add(VectorType &dst, const VectorType &src) const override
+  {
+    VectorTypeHost dst_host;
+    VectorTypeHost src_host;
+
+    copy_to_host(dst_host, dst);
+    copy_to_host(src_host, src);
+
+    host_transfer.restrict_and_add(dst_host, src_host);
+
+    copy_from_host(dst, dst_host);
+  }
+
+  /**
+   * @copydoc MGTwoLevelTransfer::interpolate
+   */
+  void
+  interpolate(VectorType &dst, const VectorType &src) const override
+  {
+    VectorTypeHost dst_host;
+    VectorTypeHost src_host;
+
+    copy_to_host(dst_host, dst);
+    copy_to_host(src_host, src);
+
+    host_transfer.interpolate(dst_host, src_host);
+
+    copy_from_host(dst, dst_host);
+  }
+
+  /**
+   * @copydoc MGTwoLevelTransfer::enable_inplace_operations_if_possible
+   */
+  std::pair<bool, bool>
+  enable_inplace_operations_if_possible(
+    const std::shared_ptr<const Utilities::MPI::Partitioner>
+      &partitioner_coarse,
+    const std::shared_ptr<const Utilities::MPI::Partitioner> &partitioner_fine)
+    override
+  {
+    return host_transfer.enable_inplace_operations_if_possible(
+      partitioner_coarse, partitioner_fine);
+  }
+
+  /**
+   * @copydoc MGTwoLevelTransfer::memory_consumption
+   */
+  std::size_t
+  memory_consumption() const override
+  {
+    return host_transfer.memory_consumption();
+  }
+
+private:
+  /**
+   * The internal transfer defined on the host which handles all operations.
+   */
+  MGTwoLevelTransfer<dim, VectorTypeHost> host_transfer;
+
+
+  /**
+   * Copies a device vector to a host vector.
+   */
+  void
+  copy_to_host(VectorTypeHost &dst, const VectorType &src) const
+  {
+    LinearAlgebra::ReadWriteVector<Number> rw_vector(
+      src.get_partitioner()->locally_owned_range());
+    rw_vector.import_elements(src, VectorOperation::insert);
+
+    dst.reinit(src.get_partitioner());
+    dst.import_elements(rw_vector, VectorOperation::insert);
+  }
+
+  /**
+   * Copies a host vector to a device vector.
+   */
+  void
+  copy_from_host(VectorType &dst, const VectorTypeHost &src) const
+  {
+    LinearAlgebra::ReadWriteVector<Number> rw_vector(
+      src.get_partitioner()->locally_owned_range());
+    rw_vector.import_elements(src, VectorOperation::insert);
+
+    if (dst.size() == 0)
+      dst.reinit(src.get_partitioner());
+    dst.import_elements(rw_vector, VectorOperation::insert);
+  }
+
+  friend class internal::MGTwoLevelTransferImplementation;
+
   friend class MGTransferMatrixFree<dim,
                                     Number,
                                     typename VectorType::memory_space>;
@@ -638,7 +921,7 @@ private:
  * Class for transfer between two non-nested multigrid levels.
  */
 template <int dim, typename VectorType>
-class MGTwoLevelTransferNonNested : public MGTwoLevelTransferBase<VectorType>
+class MGTwoLevelTransferNonNested : public MGTwoLevelTransferCore<VectorType>
 {
 private:
   static_assert(
