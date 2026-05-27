@@ -441,18 +441,19 @@ namespace PETScWrappers
   /* ----------------- PreconditionBoomerAMG -------------------- */
 
   PreconditionBoomerAMG::AdditionalData::AdditionalData(
-    const bool           symmetric_operator,
-    const double         strong_threshold,
-    const double         max_row_sum,
-    const unsigned int   aggressive_coarsening_num_levels,
-    const bool           output_details,
-    const RelaxationType relaxation_type_up,
-    const RelaxationType relaxation_type_down,
-    const RelaxationType relaxation_type_coarse,
-    const unsigned int   n_sweeps_coarse,
-    const double         tol,
-    const unsigned int   max_iter,
-    const bool           w_cycle)
+    const bool              symmetric_operator,
+    const double            strong_threshold,
+    const double            max_row_sum,
+    const unsigned int      aggressive_coarsening_num_levels,
+    const bool              output_details,
+    const RelaxationType    relaxation_type_up,
+    const RelaxationType    relaxation_type_down,
+    const RelaxationType    relaxation_type_coarse,
+    const unsigned int      n_sweeps_coarse,
+    const double            tol,
+    const unsigned int      max_iter,
+    const bool              w_cycle,
+    const MatrixProductType matrix_product_type)
     : symmetric_operator(symmetric_operator)
     , strong_threshold(strong_threshold)
     , max_row_sum(max_row_sum)
@@ -465,6 +466,7 @@ namespace PETScWrappers
     , tol(tol)
     , max_iter(max_iter)
     , w_cycle(w_cycle)
+    , matrix_product_type(matrix_product_type)
   {}
 
 
@@ -537,6 +539,31 @@ namespace PETScWrappers
             break;
           case PreconditionBoomerAMG::AdditionalData::RelaxationType::None:
             string_type = "None";
+            break;
+          default:
+            DEAL_II_NOT_IMPLEMENTED();
+        }
+      return string_type;
+    }
+
+    /**
+     * Converts the enums for the different matrix product types to the
+     * respective strings for PETSc.
+     */
+    std::string
+    to_string(PreconditionBoomerAMG::AdditionalData::MatrixProductType
+                matrix_product_type)
+    {
+      std::string string_type;
+
+      switch (matrix_product_type)
+        {
+          case PreconditionBoomerAMG::AdditionalData::MatrixProductType::
+            Cusparse:
+            string_type = "cusparse";
+            break;
+          case PreconditionBoomerAMG::AdditionalData::MatrixProductType::Hypre:
+            string_type = "hypre";
             break;
           default:
             DEAL_II_NOT_IMPLEMENTED();
@@ -682,6 +709,13 @@ namespace PETScWrappers
     if (additional_data.w_cycle)
       {
         set_option_value("-pc_hypre_boomeramg_cycle_type", "W");
+      }
+
+    if (additional_data.matrix_product_type !=
+        AdditionalData::MatrixProductType::Default)
+      {
+        set_option_value("-pc_mg_galerkin_mat_product_algorithm",
+                         to_string(additional_data.matrix_product_type));
       }
 
     ierr = PCSetFromOptions(pc);

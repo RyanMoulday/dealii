@@ -658,6 +658,16 @@ namespace PETScWrappers
       };
 
       /**
+       * Defines the available sparse matrix-matrix product types used on GPUs
+       */
+      enum class MatrixProductType
+      {
+        Cusparse,
+        Hypre,
+        Default
+      };
+
+      /**
        * Constructor. Note that BoomerAMG offers a lot more options to set
        * than what is exposed here.
        */
@@ -671,10 +681,12 @@ namespace PETScWrappers
         const RelaxationType relaxation_type_down = RelaxationType::SORJacobi,
         const RelaxationType relaxation_type_coarse =
           RelaxationType::GaussianElimination,
-        const unsigned int n_sweeps_coarse = 1,
-        const double       tol             = 0.0,
-        const unsigned int max_iter        = 1,
-        const bool         w_cycle         = false);
+        const unsigned int      n_sweeps_coarse = 1,
+        const double            tol             = 0.0,
+        const unsigned int      max_iter        = 1,
+        const bool              w_cycle         = false,
+        const MatrixProductType matrix_product_type =
+          MatrixProductType::Default);
 
       /**
        * Set this flag to true if you have a symmetric system matrix and you
@@ -751,6 +763,12 @@ namespace PETScWrappers
        * setting of a v-cycle.
        */
       bool w_cycle;
+
+      /**
+       * Defines which type of sparse matrix-matrix produce will be used
+       * on the GPU. Default will allow PETSc to decide.
+       */
+      MatrixProductType matrix_product_type;
     };
 
     /**
