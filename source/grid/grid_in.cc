@@ -5577,7 +5577,16 @@ namespace
             const std::vector<int> &elset_cells = elsets_list[elset_name];
             for (const int elset_cell : elset_cells)
               {
-                const int cell_id     = elset_cell - 1;
+                const int cell_id = elset_cell - 1;
+
+                AssertThrow(
+                  cell_id >= 0 && cell_id < static_cast<int>(cell_list.size()),
+                  ExcMessage(
+                    "While reading an ABAQUS file, an *ELSET references "
+                    "element number " +
+                    std::to_string(elset_cell) +
+                    ", which is not a valid element number."));
+
                 cell_list[cell_id][0] = material_id;
               }
           }
