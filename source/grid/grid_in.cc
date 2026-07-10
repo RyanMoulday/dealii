@@ -3849,6 +3849,13 @@ GridIn<2>::read_tecplot(std::istream &in)
           std::vector<std::string> first_var =
             Utilities::break_text_into_lines(line, 1);
           char *endptr;
+
+          AssertThrow(
+            first_var.size() <= n_vertices,
+            ExcMessage(
+              "While reading a Tecplot file, a data line contains more "
+              "values than the number of vertices declared in the header."));
+
           for (unsigned int i = 1; i < first_var.size() + 1; ++i)
             vertices[i][0] = std::strtod(first_var[i - 1].c_str(), &endptr);
 
